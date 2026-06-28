@@ -6,6 +6,14 @@ This is a local-first Deribit Dynamic Delta Hedging workbench. A Python backend 
 
 > 风险提示 / Risk notice: This project is for research and operational tooling. It can place real Deribit orders after API keys and live settings are configured. Review the code and test on Deribit testnet before any mainnet use. Nothing here is financial advice.
 
+## Support / 冰火岛社区打赏
+
+If this project helps you, you can support the Binghuodao community:
+
+```text
+EVM Wallet: 0x29f091DAA3dfee8100645ee24239bCC3ae174B42
+```
+
 ## Features / 功能
 
 - BTC and ETH support with separate parameter tabs.
