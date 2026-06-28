@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Deribit DDH Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Deribit DDH 工作台</h1>
+          <p id="subtitle">动态 Delta 对冲 · 本地参数控制 · Testnet 优先</p>
+        </div>
+        <div class="status-strip">
+          <span id="runtimeBadge" class="badge muted">未连接</span>
+          <span id="credentialBadge" class="badge muted">API 未配置</span>
+          <span id="modeBadge" class="badge muted">testnet</span>
+        </div>
+      </header>
+
+      <section class="panel controls">
+        <div class="button-row">
+          <button id="saveBtn" class="primary">保存参数</button>
+          <button id="startBtn">启用 DDH</button>
+          <button id="stopBtn">暂停 DDH</button>
+          <button id="refreshDataBtn" type="button">刷新数据</button>
+        </div>
+        <p id="message" class="message"></p>
+      </section>
+
+      <section class="grid one">
+        <form id="globalForm" class="panel">
+          <h2>全局参数</h2>
+          <div class="field-grid">
+            <label>
+              <span>环境</span>
+              <select name="mode">
+                <option value="testnet">testnet</option>
+                <option value="mainnet">mainnet</option>
+              </select>
+            </label>
+            <label>
+              <span>检查间隔（秒）</span>
+              <input name="loop_interval_seconds" type="number" min="5" step="1">
+            </label>
+            <label>
+              <span>订单类型</span>
+              <select name="order_type">
+                <option value="limit">limit</option>
+                <option value="market">market</option>
+              </select>
+            </label>
+            <label>
+              <span>滑点上限（bps）</span>
+              <input name="slippage_bps" type="number" min="0" step="0.1">
+            </label>
+            <label>
+              <span>冷却时间（秒）</span>
+              <input name="cooldown_seconds" type="number" min="0" step="1">
+            </label>
+            <label>
+              <span>maker 等待秒数</span>
+              <input name="maker_wait_seconds" type="number" min="10" step="1">
+            </label>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>API 设置</h2>
+        <form id="apiForm" class="field-grid">
+          <label>
+            <span>API ID</span>
+            <input name="client_id" autocomplete="off" placeholder="留空则保留当前 ID">
+          </label>
+          <label>
+            <span>API Secret</span>
+            <input name="client_secret" type="password" autocomplete="new-password" placeholder="留空则保留当前 Secret">
+          </label>
+        </form>
+        <div class="button-row sub-actions">
+          <button id="saveApiBtn" type="button">保存 API</button>
+          <span id="apiHint" class="hint">Secret 只保存到本地 .env，不会在页面回显。</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>币种参数</h2>
+          <div id="assetTabs" class="tabs"></div>
+        </div>
+        <div id="assetFormHost"></div>
+      </section>
+
+      <section class="grid two">
+        <section class="panel">
+          <div class="section-head">
+            <h2>运行状态</h2>
+            <span id="selectedStatusBadge" class="badge muted">BTC</span>
+          </div>
+          <div id="summary"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h2>当前仓位</h2>
+            <span id="selectedPositionBadge" class="badge muted">BTC</span>
+          </div>
+          <div id="positions"></div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>挂单状态</h2>
+        <div id="openOrders" class="events"></div>
+      </section>
+
+      <section class="panel">
+        <h2>成交记录</h2>
+        <div id="events" class="events"></div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=20260628-engineering-hardening"></script>
+  </body>
+</html>
