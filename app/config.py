@@ -165,6 +165,13 @@ def read_dotenv_values(path: Path | None = None) -> dict[str, str]:
     return values
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
+
+
 def credential_keys(mode: str) -> tuple[str, str]:
     if mode == "mainnet":
         return "DERIBIT_MAINNET_CLIENT_ID", "DERIBIT_MAINNET_CLIENT_SECRET"
@@ -194,7 +201,7 @@ def write_env_config(mode: str, client_id: str, client_secret: str) -> EnvConfig
     values[id_key] = client_id.strip()
     values[secret_key] = client_secret.strip()
     lines = [f"{key}={value}" for key, value in values.items()]
-    env_path.write_text("\n".join(lines + [""]), encoding="utf-8")
+    atomic_write_text(env_path, "\n".join(lines + [""]))
     os.environ[id_key] = client_id.strip()
     os.environ[secret_key] = client_secret.strip()
     return get_env_config(mode)

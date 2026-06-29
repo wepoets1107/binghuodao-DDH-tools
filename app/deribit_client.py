@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import math
 import time
 from typing import Any
@@ -33,10 +35,14 @@ class DeribitClient:
         self._pending: dict[int, Any] = {}
         self._request_id = 0
         self._send_lock = None
+        self._connect_lock = None
+        self._restoring_subscriptions = False
         self._subscription_handlers = []
         self._subscription_channels: set[str] = set()
         self._active_subscription_channels: set[str] = set()
         self.last_disconnect_error = ""
+        self.last_subscription_error = ""
+        self.connection_generation = 0
 
     @property
     def has_credentials(self) -> bool:
@@ -54,24 +60,49 @@ class DeribitClient:
         return self.is_connected and set(channels).issubset(self._active_subscription_channels)
 
     async def connect(self) -> None:
-        import asyncio
-
         if self._send_lock is None:
             self._send_lock = asyncio.Lock()
+        if self._connect_lock is None:
+            self._connect_lock = asyncio.Lock()
         if self.is_connected:
             return
-        self._ws = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, close_timeout=5)
-        self._receiver_task = asyncio.create_task(self._receive_loop())
-        self._access_token = ""
-        self._token_expires_at = 0.0
-        self._active_subscription_channels.clear()
-        self.last_disconnect_error = ""
+
+        async with self._connect_lock:
+            if self.is_connected:
+                return
+            last_error: Exception | None = None
+            for attempt, delay in enumerate((0.0, 1.0, 2.0, 4.0), start=1):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    self._ws = await websockets.connect(
+                        self.ws_url,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        close_timeout=5,
+                    )
+                    self._receiver_task = asyncio.create_task(self._receive_loop())
+                    self._access_token = ""
+                    self._token_expires_at = 0.0
+                    self._active_subscription_channels.clear()
+                    self.last_disconnect_error = ""
+                    self.connection_generation += 1
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    self.last_disconnect_error = f"connect attempt {attempt} failed: {exc}"
+                    await self.close()
+            if last_error:
+                raise last_error
 
     async def close(self) -> None:
         if self._receiver_task:
             self._receiver_task.cancel()
+            with suppress(asyncio.CancelledError, RuntimeError):
+                await self._receiver_task
         if self._ws:
-            await self._ws.close()
+            with suppress(Exception):
+                await self._ws.close()
         self._ws = None
         self._receiver_task = None
         self._pending.clear()
@@ -95,8 +126,8 @@ class DeribitClient:
                     for handler in list(self._subscription_handlers):
                         try:
                             handler(data.get("params") or {})
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            self.last_subscription_error = str(exc)
         except Exception as exc:
             self.last_disconnect_error = str(exc)
             for future in list(self._pending.values()):
@@ -110,13 +141,14 @@ class DeribitClient:
             self._active_subscription_channels.clear()
 
     async def rpc(self, method: str, params: dict[str, Any] | None = None, auth: bool = False) -> Any:
-        import asyncio
         import json
 
         async def send_once() -> Any:
             await self.connect()
             if auth:
                 await self.get_access_token()
+                if method != "private/subscribe":
+                    await self.restore_subscriptions()
             self._request_id += 1
             request_id = self._request_id
             payload = {
@@ -145,9 +177,26 @@ class DeribitClient:
         if handler not in self._subscription_handlers:
             self._subscription_handlers.append(handler)
         self._subscription_channels.update(channels)
-        result = await self.rpc("private/subscribe", {"channels": channels}, auth=True)
-        self._active_subscription_channels.update(channels)
-        return result
+        return await self.restore_subscriptions(channels)
+
+    async def restore_subscriptions(self, channels: list[str] | None = None) -> Any:
+        if self._restoring_subscriptions:
+            return None
+        target = set(channels or self._subscription_channels)
+        missing = sorted(target - self._active_subscription_channels)
+        if not missing:
+            return None
+        self._restoring_subscriptions = True
+        try:
+            result = await self.rpc("private/subscribe", {"channels": missing}, auth=True)
+            self._active_subscription_channels.update(missing)
+            self.last_subscription_error = ""
+            return result
+        except Exception as exc:
+            self.last_subscription_error = str(exc)
+            raise
+        finally:
+            self._restoring_subscriptions = False
 
     async def get_access_token(self) -> str:
         if self._access_token and time.time() < self._token_expires_at - 30:

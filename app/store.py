@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,13 @@ def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    ensure_data_dir()
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
+
+
 def load_config() -> AppConfig:
     ensure_data_dir()
     if not CONFIG_PATH.exists():
@@ -38,10 +46,7 @@ def load_config() -> AppConfig:
 
 def save_config(config: AppConfig) -> None:
     ensure_data_dir()
-    CONFIG_PATH.write_text(
-        json.dumps(config.model_dump(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    atomic_write_text(CONFIG_PATH, json.dumps(config.model_dump(), indent=2, ensure_ascii=False))
 
 
 def append_event(level: str, event: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -84,7 +89,7 @@ def prune_events(retention_days: int = EVENT_RETENTION_DAYS, max_rows: int = EVE
             kept.append(json.dumps(row, ensure_ascii=False))
     if len(kept) > max_rows:
         kept = kept[-max_rows:]
-    EVENTS_PATH.write_text("\n".join(kept + [""]) if kept else "", encoding="utf-8")
+    atomic_write_text(EVENTS_PATH, "\n".join(kept + [""]) if kept else "")
     global _EVENTS_CACHE_MTIME, _EVENTS_CACHE_ROWS
     _EVENTS_CACHE_MTIME = None
     _EVENTS_CACHE_ROWS = []

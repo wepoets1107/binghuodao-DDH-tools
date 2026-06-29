@@ -14,6 +14,8 @@ from app.strategy import coin_amount_from_exchange_amount, decide_hedge, exchang
 REBALANCE_SETTLE_SECONDS = 1.0
 MAX_SPLIT_ORDERS = 20
 MAX_MAKER_REFRESH_RECOVERY_SECONDS = 300
+MAX_MAKER_REFRESHES_PER_CYCLE = 3
+MANUAL_REVIEW_NOTICE_SECONDS = 300
 
 
 class DDHRuntime:
@@ -30,7 +32,15 @@ class DDHRuntime:
         self.open_order_cache: dict[str, dict[str, Any]] = {}
         self.order_stream_signature: tuple[Any, ...] | None = None
         self.fill_refresh_tasks: dict[str, asyncio.Task] = {}
+        self.currency_locks: dict[str, asyncio.Lock] = {}
+        self.maker_refresh_state: dict[str, dict[str, Any]] = {}
         self.state_lock = asyncio.Lock()
+
+    def currency_lock(self, currency: str) -> asyncio.Lock:
+        key = currency.upper()
+        if key not in self.currency_locks:
+            self.currency_locks[key] = asyncio.Lock()
+        return self.currency_locks[key]
 
     def status(self) -> dict[str, Any]:
         config = load_config()
@@ -60,7 +70,7 @@ class DDHRuntime:
         client = await self.get_client(config)
         env = get_env_config(config.mode)
         instruments = tuple(sorted(asset.hedge_instrument for asset in config.assets.values()))
-        signature = (config.mode, env.deribit_client_id, env.deribit_client_secret, instruments)
+        signature = (config.mode, env.deribit_client_id, env.deribit_client_secret, instruments, client.connection_generation)
         channels = [f"user.orders.{instrument}.raw" for instrument in instruments]
         if self.order_stream_signature == signature and client.has_active_subscriptions(channels):
             return
@@ -71,7 +81,7 @@ class DDHRuntime:
                 self.apply_order_update(order, currency=currency, record_fill=False)
 
         await client.subscribe(channels, self.handle_order_subscription)
-        self.order_stream_signature = signature
+        self.order_stream_signature = (config.mode, env.deribit_client_id, env.deribit_client_secret, instruments, client.connection_generation)
 
     def handle_order_subscription(self, params: dict[str, Any]) -> None:
         data = params.get("data")
@@ -97,6 +107,7 @@ class DDHRuntime:
                 self.record_fill_event(order, inferred_currency, filled_amount - previous_filled)
             self.open_order_cache.pop(order_id, None)
             if filled_changed and state == "filled" and not self.has_open_orders_for_currency(inferred_currency):
+                self.maker_refresh_state.pop(inferred_currency.upper(), None)
                 self.request_fill_refresh(inferred_currency)
             return
         amount = float(order.get("amount") or 0)
@@ -210,7 +221,6 @@ class DDHRuntime:
         now_ms = datetime.now(UTC).timestamp() * 1000
         stale_order_ids_by_currency: dict[str, set[str]] = {}
         refresh_by_currency: set[str] = set()
-        cancel_only_by_currency: set[str] = set()
         recovery_window_ms = max(config.maker_wait_seconds * 3, MAX_MAKER_REFRESH_RECOVERY_SECONDS) * 1000
         for order in list(self.open_order_cache.values()):
             created = float(order.get("creation_timestamp") or 0)
@@ -226,25 +236,57 @@ class DDHRuntime:
             stale_order_ids_by_currency.setdefault(currency, set()).add(order_id)
             if age_ms <= recovery_window_ms:
                 refresh_by_currency.add(currency)
-            else:
-                cancel_only_by_currency.add(currency)
         if not stale_order_ids_by_currency:
             return
         client = await self.get_client(config)
         for currency, order_ids in stale_order_ids_by_currency.items():
-            cancelled = await client.cancel_ddh_orders(currency, order_ids=order_ids)
-            for order in cancelled:
-                self.apply_order_update(order, currency=currency, record_fill=True)
-            if cancelled:
+            async with self.currency_lock(currency):
+                state = self.maker_refresh_state.setdefault(currency, {"count": 0, "last_refresh_at": None, "last_notice_at": None})
                 should_refresh = currency in refresh_by_currency
+                if should_refresh and int(state.get("count") or 0) >= MAX_MAKER_REFRESHES_PER_CYCLE:
+                    notice_at = state.get("last_notice_at")
+                    now = datetime.now(UTC)
+                    if not notice_at or (now - notice_at).total_seconds() >= MANUAL_REVIEW_NOTICE_SECONDS:
+                        state["last_notice_at"] = now
+                        append_event(
+                            "warning",
+                            "maker_orders_waiting_manual_review",
+                            {
+                                "currency": currency,
+                                "order_ids": sorted(order_ids),
+                                "message": "Maker orders reached the refresh limit and are waiting for fill or manual review.",
+                            },
+                        )
+                    continue
+
+                cancelled = await client.cancel_ddh_orders(currency, order_ids=order_ids)
+                for order in cancelled:
+                    self.apply_order_update(order, currency=currency, record_fill=True)
+                if not cancelled:
+                    continue
+
                 append_event(
                     "info",
                     "maker_orders_refreshed" if should_refresh else "maker_orders_expired_cancelled",
                     {"currency": currency, "cancelled": cancelled},
                 )
                 if not should_refresh:
+                    self.maker_refresh_state.pop(currency, None)
                     continue
-                await self.run_once(reason="maker_refresh", force=True, execute=True, currencies=[currency])
+
+                state["count"] = int(state.get("count") or 0) + 1
+                state["last_refresh_at"] = datetime.now(UTC)
+                result = await self.evaluate_asset(client, config, currency, "maker_refresh", True, True)
+                checked_at = utc_now_iso()
+                await self.record_check_results(
+                    checked_at,
+                    [currency],
+                    {currency: result},
+                    reason="maker_refresh",
+                    force=True,
+                    execute=True,
+                    due_key="",
+                )
 
     async def start(self) -> dict[str, Any]:
         if self.task and not self.task.done():
@@ -329,9 +371,24 @@ class DDHRuntime:
             if asset is None:
                 results[currency] = {"enabled": False, "error": "Unsupported currency."}
                 continue
-            result = await self.evaluate_asset(client, config, currency, reason, force, execute)
+            async with self.currency_lock(currency):
+                result = await self.evaluate_asset(client, config, currency, reason, force, execute)
             results[currency] = result
         checked_at = utc_now_iso()
+        await self.record_check_results(checked_at, selected, results, reason, force, execute, due_key)
+        return {"checked_at": checked_at, "results": results}
+
+    async def record_check_results(
+        self,
+        checked_at: str,
+        selected: list[str],
+        results: dict[str, Any],
+        reason: str,
+        force: bool,
+        execute: bool,
+        due_key: str,
+    ) -> None:
+        config = load_config()
         async with self.state_lock:
             self.last_check_at = checked_at
             if set(selected) >= set(config.assets.keys()):
@@ -345,7 +402,6 @@ class DDHRuntime:
             "check_completed",
             {"reason": reason, "force": force, "execute": execute, "due_key": due_key, "currencies": selected, "results": results},
         )
-        return {"checked_at": checked_at, "results": results}
 
     async def evaluate_asset(
         self,
@@ -437,6 +493,8 @@ class DDHRuntime:
 
             if executed:
                 self.last_trade_at[currency] = datetime.now(UTC)
+                if attempts and reason != "maker_refresh":
+                    self.maker_refresh_state.pop(currency.upper(), None)
                 if not config.dry_run:
                     await asyncio.sleep(REBALANCE_SETTLE_SECONDS)
                     portfolio, market, decision = await read_state()

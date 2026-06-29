@@ -688,7 +688,11 @@ $("#saveBtn").addEventListener("click", async () => {
     renderAssetForm();
     updateModeBadge();
     updateCredentialsDisplay();
-    showMessage("参数已保存。");
+    if (payload.cancel_error) {
+      showMessage(`参数已保存；旧 DDH 挂单撤单失败：${payload.cancel_error}`, true);
+    } else {
+      showMessage("参数已保存。");
+    }
   } catch (error) {
     showMessage(error.message, true);
   }

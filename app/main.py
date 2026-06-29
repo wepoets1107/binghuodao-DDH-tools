@@ -55,10 +55,23 @@ async def get_config() -> JSONResponse:
 @app.post("/api/config")
 async def update_config(payload: AppConfig) -> JSONResponse:
     old_config = load_config()
-    cancelled = await runtime.cancel_orders_for_config_change(old_config, payload)
     save_config(payload)
+    cancelled = []
+    cancel_error = ""
+    try:
+        cancelled = await runtime.cancel_orders_for_config_change(old_config, payload)
+    except Exception as exc:
+        cancel_error = str(exc)
+        append_event("error", "config_change_cancel_failed", {"message": cancel_error})
     append_event("info", "config_saved", {"mode": payload.mode, "dry_run": payload.dry_run})
-    return JSONResponse({"ok": True, "config": payload.model_dump(), "cancelled_orders": cancelled})
+    return JSONResponse(
+        {
+            "ok": True,
+            "config": payload.model_dump(),
+            "cancelled_orders": cancelled,
+            "cancel_error": cancel_error,
+        }
+    )
 
 
 @app.post("/api/credentials")
